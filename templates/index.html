@@ -1,0 +1,826 @@
+{% extends "base.html" %}
+
+{% block title %}Pgmnt{% endblock %}
+
+{% block head %}
+<style>
+    /* Board page needs the full viewport width, unlike the narrow login container */
+    body.board-page .container { max-width: none; padding: 0; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="project-selector" class="project-selector">
+    <div class="page-header">
+        <h1>PGMNT</h1>
+        <div class="page-header-right">
+            <a href="/supplies" class="header-btn">Supplies</a>
+            <button id="selector-logout-btn" class="header-btn">Logout</button>
+        </div>
+    </div>
+    <div class="project-selector-body">
+        <div class="project-selector-label">Select an army</div>
+        <div id="project-list" class="project-list"></div>
+        <div id="add-project-wrap" class="add-project-wrap"></div>
+    </div>
+</div>
+
+<div id="board-view" class="board-view" style="display:none;">
+    <div class="page-header">
+        <h1 id="current-project-name">PGMNT</h1>
+        <div class="page-header-right">
+            <button id="back-to-projects-btn" class="header-btn">&larr; Armies</button>
+            <button id="view-toggle-btn" class="header-btn">List View</button>
+            <a href="/supplies" class="header-btn">Supplies</a>
+            <button id="logout-btn" class="header-btn">Logout</button>
+        </div>
+    </div>
+
+    <div id="board-row" class="board-row"></div>
+
+    <div id="card-panel" class="card-panel" style="display:none;">
+        <div class="card-panel-header">
+            <input id="card-title" class="card-title-input" type="text" placeholder="Card title">
+            <button id="card-close" class="card-close">&times;</button>
+        </div>
+
+        <div class="card-panel-section">
+            <div class="card-panel-label">Color</div>
+            <div id="card-color-swatches" class="card-color-swatches"></div>
+        </div>
+
+        <div class="card-panel-section">
+            <div class="card-panel-label">Notes</div>
+            <textarea id="card-notes" class="card-notes-input" placeholder="Notes&hellip;"></textarea>
+        </div>
+
+        <div class="card-panel-section">
+            <div class="card-panel-label">
+                Checklist <span id="checklist-count"></span>
+            </div>
+            <div id="checklist-items" class="checklist-items"></div>
+            <form id="checklist-add-form" class="checklist-add-form">
+                <input id="checklist-add-input" type="text" placeholder="Add item&hellip;" autocomplete="off">
+            </form>
+        </div>
+
+        <div class="card-panel-actions">
+            <button id="card-delete" class="card-action-btn card-danger">Delete</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.body.classList.add('board-page');
+
+// ── Utilities ────────────────────────────────────────────────────────────────
+
+async function fetchApi(url, opts = {}) {
+    const res = await fetch(url, opts);
+    if (res.redirected && res.url.includes('/login')) {
+        window.location.href = '/login';
+        return null;
+    }
+    return res;
+}
+
+function esc(str) {
+    return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function apiJson(url, opts = {}) {
+    const res = await fetchApi(url, opts);
+    if (!res) return null;
+    return res.json();
+}
+
+const COLOR_MAP = {
+    red:    '#ff4444',
+    orange: '#ff8c00',
+    yellow: '#ffd700',
+    green:  '#44cc66',
+    teal:   '#00bcd4',
+    blue:   '#4488ff',
+    grey:   '#7c8a99',
+    pink:   '#ff69b4',
+};
+
+function hexToRgba(hex, alpha) {
+    const r = parseInt(hex.slice(1,3), 16);
+    const g = parseInt(hex.slice(3,5), 16);
+    const b = parseInt(hex.slice(5,7), 16);
+    return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function applyCardColor(el, colorName) {
+    el.classList.remove('has-color');
+    el.style.removeProperty('--card-color-bg');
+    el.style.removeProperty('--card-color-border');
+    const hex = COLOR_MAP[colorName];
+    if (!hex) return;
+    el.style.setProperty('--card-color-bg', hexToRgba(hex, 0.16));
+    el.style.setProperty('--card-color-border', hexToRgba(hex, 0.65));
+    el.classList.add('has-color');
+}
+
+// ── State ────────────────────────────────────────────────────────────────────
+
+let projectsData = [];
+let currentProjectId = null;
+let boardData = { columns: [] };
+let activeCard = null;          // full card object currently open in the panel
+let cardTitleOriginal = '';
+let cardNoteOriginal = '';
+let cardChecklist = [];
+let columnSortable = null;
+let cardSortables = [];
+let pendingFocusColumnId = null;
+let viewMode = localStorage.getItem('pgmnt-view-mode') === 'list' ? 'list' : 'board';
+
+function updateViewToggleLabel() {
+    document.getElementById('view-toggle-btn').textContent = viewMode === 'list' ? 'Board View' : 'List View';
+}
+
+document.getElementById('view-toggle-btn').addEventListener('click', () => {
+    viewMode = viewMode === 'list' ? 'board' : 'list';
+    localStorage.setItem('pgmnt-view-mode', viewMode);
+    updateViewToggleLabel();
+    renderBoard();
+});
+updateViewToggleLabel();
+
+function findCard(cardId) {
+    for (const col of boardData.columns) {
+        const card = col.cards.find(c => c.id === cardId);
+        if (card) return card;
+    }
+    return null;
+}
+
+// ── Projects ─────────────────────────────────────────────────────────────────
+
+function getProjectIdFromUrl() {
+    return new URLSearchParams(window.location.search).get('project');
+}
+
+function setProjectIdInUrl(id) {
+    const url = new URL(window.location);
+    if (id) url.searchParams.set('project', id);
+    else url.searchParams.delete('project');
+    window.history.replaceState({}, '', url);
+}
+
+async function loadProjects() {
+    const data = await apiJson('/api/projects');
+    projectsData = data || [];
+}
+
+async function initApp() {
+    await loadProjects();
+    const urlProjectId = getProjectIdFromUrl();
+    if (urlProjectId && projectsData.some(p => p.id === urlProjectId)) {
+        await openProject(urlProjectId);
+    } else {
+        showProjectSelector();
+    }
+}
+
+function showProjectSelector() {
+    currentProjectId = null;
+    setProjectIdInUrl(null);
+    document.getElementById('project-selector').style.display = 'block';
+    document.getElementById('board-view').style.display = 'none';
+    renderProjectSelector();
+}
+
+function renderProjectSelector() {
+    const list = document.getElementById('project-list');
+    list.innerHTML = '';
+
+    if (projectsData.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'list-empty';
+        empty.textContent = 'No armies yet — add your first one below.';
+        list.appendChild(empty);
+    }
+
+    projectsData.forEach(p => {
+        const item = document.createElement('div');
+        item.className = 'project-card';
+        item.innerHTML = `
+            <span class="project-card-name">${esc(p.name)}</span>
+            <button type="button" class="project-rename-btn" title="Rename">&#9998;</button>
+            <button type="button" class="project-delete-btn" title="Delete">&times;</button>
+        `;
+        item.querySelector('.project-card-name').addEventListener('click', () => openProject(p.id));
+        item.querySelector('.project-rename-btn').addEventListener('click', async e => {
+            e.stopPropagation();
+            const name = prompt('Rename army', p.name);
+            if (!name || !name.trim() || name.trim() === p.name) return;
+            await apiJson(`/api/projects/${p.id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name.trim() }),
+            });
+            await loadProjects();
+            renderProjectSelector();
+        });
+        item.querySelector('.project-delete-btn').addEventListener('click', async e => {
+            e.stopPropagation();
+            if (!confirm(`Delete army "${p.name}" and its entire board? This cannot be undone.`)) return;
+            await apiJson(`/api/projects/${p.id}`, { method: 'DELETE' });
+            await loadProjects();
+            renderProjectSelector();
+        });
+        list.appendChild(item);
+    });
+
+    const addWrap = document.getElementById('add-project-wrap');
+    addWrap.innerHTML = `<button type="button" class="add-project-btn">+ Add army</button>`;
+    addWrap.querySelector('.add-project-btn').addEventListener('click', () => showAddProjectForm(addWrap));
+}
+
+function showAddProjectForm(wrap) {
+    wrap.innerHTML = `
+        <form class="add-project-form">
+            <input type="text" placeholder="Army name" autocomplete="off">
+            <div class="inline-form-actions">
+                <button type="submit" class="inline-form-confirm">Add</button>
+                <button type="button" class="inline-form-cancel">&times;</button>
+            </div>
+        </form>`;
+    const input = wrap.querySelector('input');
+    const form = wrap.querySelector('form');
+    input.focus();
+
+    form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const name = input.value.trim();
+        if (!name) return;
+        const created = await apiJson('/api/projects', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+        });
+        await loadProjects();
+        if (created && created.id) {
+            await openProject(created.id);
+        } else {
+            renderProjectSelector();
+        }
+    });
+    input.addEventListener('keydown', e => {
+        if (e.key === 'Escape') renderProjectSelector();
+    });
+    wrap.querySelector('.inline-form-cancel').addEventListener('click', () => renderProjectSelector());
+}
+
+async function openProject(id) {
+    currentProjectId = id;
+    setProjectIdInUrl(id);
+    const project = projectsData.find(p => p.id === id);
+    document.getElementById('current-project-name').textContent = project ? project.name : 'PGMNT';
+    document.getElementById('project-selector').style.display = 'none';
+    document.getElementById('board-view').style.display = 'block';
+    await loadBoard();
+}
+
+document.getElementById('back-to-projects-btn').addEventListener('click', async () => {
+    if (activeCard) await closeCardPanel();
+    await loadProjects();
+    showProjectSelector();
+});
+
+// ── Load / Render ────────────────────────────────────────────────────────────
+
+async function loadBoard() {
+    if (!currentProjectId) return;
+    const data = await apiJson(`/api/board?project_id=${encodeURIComponent(currentProjectId)}`);
+    if (!data || data.error) return;
+    boardData = data;
+    renderBoard();
+}
+
+function destroySortables() {
+    cardSortables.forEach(s => s.destroy());
+    cardSortables = [];
+    if (columnSortable) { columnSortable.destroy(); columnSortable = null; }
+}
+
+function renderBoard() {
+    const savedCardId = activeCard ? activeCard.id : null;
+
+    destroySortables();
+
+    const row = document.getElementById('board-row');
+    row.innerHTML = '';
+    row.classList.toggle('list-mode', viewMode === 'list');
+
+    if (viewMode === 'list') {
+        renderListView(row);
+    } else {
+        boardData.columns.forEach(col => row.appendChild(buildColumnElement(col)));
+        row.appendChild(buildAddColumnElement());
+        initSortables();
+    }
+
+    if (savedCardId) {
+        const card = findCard(savedCardId);
+        if (card) {
+            openCardPanel(card.id);
+        } else {
+            closeCardPanelImmediate();
+        }
+    }
+
+    if (pendingFocusColumnId && viewMode === 'board') {
+        const colEl = row.querySelector(`.board-column[data-column-id="${pendingFocusColumnId}"]`);
+        const targetColumnId = pendingFocusColumnId;
+        pendingFocusColumnId = null;
+        if (colEl) {
+            const wrap = colEl.querySelector('.card-add-wrap');
+            if (wrap) showAddCardForm(wrap, targetColumnId);
+        }
+    } else {
+        pendingFocusColumnId = null;
+    }
+}
+
+function renderListView(row) {
+    if (boardData.columns.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'list-empty';
+        empty.textContent = 'No columns yet — switch to Board view to add one.';
+        row.appendChild(empty);
+        return;
+    }
+
+    boardData.columns.forEach(col => {
+        const section = document.createElement('div');
+        section.className = 'list-section';
+
+        const heading = document.createElement('div');
+        heading.className = 'list-section-heading';
+        heading.textContent = col.name;
+        section.appendChild(heading);
+
+        if (col.cards.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'list-empty';
+            empty.textContent = '—';
+            section.appendChild(empty);
+        }
+
+        col.cards.forEach(card => {
+            const item = document.createElement('div');
+            item.className = 'list-row';
+            if (card.color) applyCardColor(item, card.color);
+
+            const total = card.checklist.length;
+            const done = card.checklist.filter(i => i.done).length;
+            const badge = total > 0 ? `<span class="list-row-badge">${done}/${total}</span>` : '';
+
+            item.innerHTML = `<span class="list-row-title">${esc(card.title)}</span>${badge}`;
+            item.addEventListener('click', () => openCardPanel(card.id));
+            section.appendChild(item);
+        });
+
+        row.appendChild(section);
+    });
+}
+
+function buildColumnElement(column) {
+    const col = document.createElement('div');
+    col.className = 'board-column';
+    col.dataset.columnId = column.id;
+
+    const header = document.createElement('div');
+    header.className = 'column-header';
+    header.innerHTML = `
+        <span class="column-drag-handle">&#9776;</span>
+        <input class="column-name-input" type="text" value="${esc(column.name)}">
+        <button class="column-delete-btn" title="Delete column">&times;</button>
+    `;
+    col.appendChild(header);
+
+    const nameInput = header.querySelector('.column-name-input');
+    nameInput.addEventListener('blur', () => handleColumnRename(column.id, nameInput));
+    nameInput.addEventListener('keydown', e => {
+        if (e.key === 'Enter') nameInput.blur();
+    });
+    header.querySelector('.column-delete-btn').addEventListener('click', () => handleColumnDelete(column.id, column.name));
+
+    const cardList = document.createElement('div');
+    cardList.className = 'card-list';
+    cardList.dataset.columnId = column.id;
+    column.cards.forEach(card => cardList.appendChild(buildCardElement(card)));
+    col.appendChild(cardList);
+
+    const addWrap = document.createElement('div');
+    addWrap.className = 'card-add-wrap';
+    addWrap.innerHTML = `<button type="button" class="card-add-btn">+ Add card</button>`;
+    addWrap.querySelector('.card-add-btn').addEventListener('click', () => showAddCardForm(addWrap, column.id));
+    col.appendChild(addWrap);
+
+    return col;
+}
+
+function showAddCardForm(wrap, columnId) {
+    wrap.innerHTML = `
+        <form class="card-add-form">
+            <textarea placeholder="Card title" rows="2" autocomplete="off"></textarea>
+            <div class="inline-form-actions">
+                <button type="submit" class="inline-form-confirm">Add</button>
+                <button type="button" class="inline-form-cancel">&times;</button>
+            </div>
+        </form>`;
+    const textarea = wrap.querySelector('textarea');
+    const form = wrap.querySelector('form');
+    textarea.focus();
+
+    form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const title = textarea.value.trim();
+        if (!title) return;
+        pendingFocusColumnId = columnId;
+        await apiJson('/api/cards', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ column_id: columnId, title }),
+        });
+        await loadBoard();
+    });
+    textarea.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            form.requestSubmit();
+        } else if (e.key === 'Escape') {
+            renderBoard();
+        }
+    });
+    wrap.querySelector('.inline-form-cancel').addEventListener('click', () => renderBoard());
+}
+
+function buildAddColumnElement() {
+    const el = document.createElement('div');
+    el.className = 'add-column';
+    el.innerHTML = `<button type="button" class="add-column-btn">+ Add column</button>`;
+    el.querySelector('.add-column-btn').addEventListener('click', () => showAddColumnForm(el));
+    return el;
+}
+
+function showAddColumnForm(el) {
+    el.innerHTML = `
+        <form class="add-column-form">
+            <input type="text" placeholder="Column name" autocomplete="off">
+            <div class="inline-form-actions">
+                <button type="submit" class="inline-form-confirm">Add</button>
+                <button type="button" class="inline-form-cancel">&times;</button>
+            </div>
+        </form>`;
+    const input = el.querySelector('input');
+    const form = el.querySelector('form');
+    input.focus();
+
+    form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const name = input.value.trim();
+        if (!name) return;
+        await apiJson('/api/columns', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_id: currentProjectId, name }),
+        });
+        await loadBoard();
+    });
+    input.addEventListener('keydown', e => {
+        if (e.key === 'Escape') renderBoard();
+    });
+    el.querySelector('.inline-form-cancel').addEventListener('click', () => renderBoard());
+}
+
+function buildCardElement(card) {
+    const div = document.createElement('div');
+    div.className = 'board-card';
+    div.dataset.id = card.id;
+    if (card.color) applyCardColor(div, card.color);
+
+    const total = card.checklist.length;
+    const done = card.checklist.filter(i => i.done).length;
+    const badge = total > 0 ? `<span class="card-checklist-badge">${done}/${total}</span>` : '';
+
+    div.innerHTML = `
+        <div class="card-row">
+            <span class="drag-handle">&#9776;</span>
+            <span class="card-title-text">${esc(card.title)}</span>
+        </div>
+        ${badge ? `<div class="card-footer">${badge}</div>` : ''}
+    `;
+
+    div.querySelector('.card-title-text').addEventListener('click', () => openCardPanel(card.id));
+
+    return div;
+}
+
+// ── Sortables ────────────────────────────────────────────────────────────────
+
+function initSortables() {
+    if (typeof Sortable === 'undefined') return;
+
+    const isTouch = window.matchMedia('(pointer: coarse)').matches;
+
+    const cardOpts = {
+        group: 'board-cards',
+        animation: 150,
+        ghostClass: 'sortable-ghost',
+        chosenClass: 'sortable-chosen',
+        delay: 200,
+        delayOnTouchOnly: true,
+        touchStartThreshold: 5,
+        onEnd: onCardDragEnd,
+    };
+    if (!isTouch) cardOpts.handle = '.drag-handle';
+
+    document.querySelectorAll('.card-list').forEach(list => {
+        cardSortables.push(Sortable.create(list, { ...cardOpts }));
+    });
+
+    const columnOpts = {
+        animation: 150,
+        ghostClass: 'sortable-ghost',
+        chosenClass: 'sortable-chosen',
+        delay: 200,
+        delayOnTouchOnly: true,
+        touchStartThreshold: 5,
+        filter: '.add-column',
+        onEnd: onColumnDragEnd,
+    };
+    if (!isTouch) columnOpts.handle = '.column-drag-handle';
+    columnSortable = Sortable.create(document.getElementById('board-row'), columnOpts);
+}
+
+async function onCardDragEnd(evt) {
+    const fromColumnId = evt.from.dataset.columnId;
+    const toColumnId = evt.to.dataset.columnId;
+    const cardId = evt.item.dataset.id;
+    const orderedIds = Array.from(evt.to.children).map(el => el.dataset.id);
+
+    if (fromColumnId === toColumnId) {
+        await apiJson('/api/cards/reorder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ column_id: toColumnId, ordered_ids: orderedIds }),
+        });
+    } else {
+        await apiJson('/api/cards/move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ card_id: cardId, dest_column_id: toColumnId, ordered_ids: orderedIds }),
+        });
+    }
+    await loadBoard();
+}
+
+async function onColumnDragEnd(evt) {
+    const orderedIds = Array.from(document.getElementById('board-row').children)
+        .filter(el => el.classList.contains('board-column'))
+        .map(el => el.dataset.columnId);
+    await apiJson('/api/columns/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_id: currentProjectId, ordered_ids: orderedIds }),
+    });
+    await loadBoard();
+}
+
+// ── Column actions ───────────────────────────────────────────────────────────
+
+async function handleColumnRename(columnId, inputEl) {
+    const name = inputEl.value.trim();
+    const column = boardData.columns.find(c => c.id === columnId);
+    if (!column || !name || name === column.name) {
+        if (column) inputEl.value = column.name;
+        return;
+    }
+    column.name = name;
+    await apiJson(`/api/columns/${columnId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+    });
+}
+
+async function handleColumnDelete(columnId, name) {
+    if (!confirm(`Delete column "${name}" and all its cards?`)) return;
+    await apiJson(`/api/columns/${columnId}`, { method: 'DELETE' });
+    await loadBoard();
+}
+
+// ── Card panel ───────────────────────────────────────────────────────────────
+
+function openCardPanel(cardId) {
+    const card = findCard(cardId);
+    if (!card) return;
+
+    activeCard = card;
+
+    const titleEl = document.getElementById('card-title');
+    titleEl.value = card.title;
+    cardTitleOriginal = card.title;
+
+    const notesEl = document.getElementById('card-notes');
+    notesEl.value = card.notes || '';
+    cardNoteOriginal = card.notes || '';
+
+    cardChecklist = card.checklist ? JSON.parse(JSON.stringify(card.checklist)) : [];
+
+    renderColorSwatches();
+    renderChecklist();
+
+    document.getElementById('card-panel').style.display = 'flex';
+}
+
+function closeCardPanelImmediate() {
+    document.getElementById('card-panel').style.display = 'none';
+    activeCard = null;
+    cardTitleOriginal = '';
+    cardNoteOriginal = '';
+    cardChecklist = [];
+}
+
+async function closeCardPanel() {
+    await saveCardChanges();
+    closeCardPanelImmediate();
+}
+
+async function saveCardTitle() {
+    if (!activeCard) return;
+    const newTitle = document.getElementById('card-title').value.trim();
+    if (!newTitle || newTitle === cardTitleOriginal) return;
+    cardTitleOriginal = newTitle;
+    await apiJson(`/api/cards/${activeCard.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle }),
+    });
+    const cardEl = document.querySelector(`.board-card[data-id="${activeCard.id}"] .card-title-text`);
+    if (cardEl) cardEl.textContent = newTitle;
+}
+
+async function saveCardNote() {
+    if (!activeCard) return;
+    const newNote = document.getElementById('card-notes').value;
+    if (newNote === cardNoteOriginal) return;
+    cardNoteOriginal = newNote;
+    await apiJson(`/api/cards/${activeCard.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: newNote }),
+    });
+}
+
+async function saveCardChanges() {
+    await saveCardNote();
+    await saveCardTitle();
+}
+
+async function saveCardColor(colorName) {
+    if (!activeCard) return;
+    await saveCardChanges();
+    activeCard.color = colorName || null;
+    await apiJson(`/api/cards/${activeCard.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ color: colorName || '' }),
+    });
+    await loadBoard();
+}
+
+function renderColorSwatches() {
+    const container = document.getElementById('card-color-swatches');
+    container.innerHTML = '';
+
+    const clearSwatch = document.createElement('div');
+    clearSwatch.className = 'card-color-swatch color-clear' + (!activeCard.color ? ' active' : '');
+    clearSwatch.title = 'None';
+    clearSwatch.addEventListener('click', () => saveCardColor(''));
+    container.appendChild(clearSwatch);
+
+    Object.entries(COLOR_MAP).forEach(([name, hex]) => {
+        const swatch = document.createElement('div');
+        swatch.className = 'card-color-swatch' + (activeCard.color === name ? ' active' : '');
+        swatch.style.background = hex;
+        swatch.title = name;
+        swatch.addEventListener('click', () => saveCardColor(name));
+        container.appendChild(swatch);
+    });
+}
+
+async function persistChecklist() {
+    if (!activeCard) return;
+    activeCard.checklist = JSON.parse(JSON.stringify(cardChecklist));
+    await apiJson(`/api/cards/${activeCard.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ checklist: cardChecklist }),
+    });
+    const cardEl = document.querySelector(`.board-card[data-id="${activeCard.id}"]`);
+    if (cardEl) {
+        const total = cardChecklist.length;
+        const done = cardChecklist.filter(i => i.done).length;
+        let footer = cardEl.querySelector('.card-footer');
+        if (total > 0) {
+            if (!footer) {
+                footer = document.createElement('div');
+                footer.className = 'card-footer';
+                cardEl.appendChild(footer);
+            }
+            footer.innerHTML = `<span class="card-checklist-badge">${done}/${total}</span>`;
+        } else if (footer) {
+            footer.remove();
+        }
+    }
+}
+
+function renderChecklist() {
+    const container = document.getElementById('checklist-items');
+    container.innerHTML = '';
+    cardChecklist.forEach((item, idx) => {
+        const row = document.createElement('div');
+        row.className = 'checklist-item' + (item.done ? ' done' : '');
+        row.innerHTML = `
+            <input type="checkbox" class="checklist-check" ${item.done ? 'checked' : ''}>
+            <span class="checklist-text">${esc(item.text)}</span>
+            <button type="button" class="checklist-delete" title="Remove">&times;</button>
+        `;
+        row.querySelector('.checklist-check').addEventListener('change', e => {
+            cardChecklist[idx].done = e.target.checked;
+            row.classList.toggle('done', e.target.checked);
+            persistChecklist();
+        });
+        row.querySelector('.checklist-delete').addEventListener('click', () => {
+            cardChecklist.splice(idx, 1);
+            renderChecklist();
+            persistChecklist();
+        });
+        container.appendChild(row);
+    });
+
+    const countEl = document.getElementById('checklist-count');
+    if (cardChecklist.length > 0) {
+        const done = cardChecklist.filter(i => i.done).length;
+        countEl.textContent = `(${done}/${cardChecklist.length})`;
+    } else {
+        countEl.textContent = '';
+    }
+}
+
+document.getElementById('checklist-add-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const input = document.getElementById('checklist-add-input');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    cardChecklist.push({ text, done: false });
+    renderChecklist();
+    persistChecklist();
+});
+
+document.getElementById('card-close').addEventListener('click', () => closeCardPanel());
+
+document.getElementById('card-delete').addEventListener('click', async () => {
+    if (!activeCard) return;
+    if (!confirm('Delete this card?')) return;
+    const cardId = activeCard.id;
+    closeCardPanelImmediate();
+    await apiJson(`/api/cards/${cardId}`, { method: 'DELETE' });
+    await loadBoard();
+});
+
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && activeCard) closeCardPanel();
+});
+
+document.addEventListener('click', e => {
+    if (activeCard &&
+        !e.target.closest('#card-panel') &&
+        !e.target.closest('.card-title-text') &&
+        !e.target.closest('.list-row')) {
+        closeCardPanel();
+    }
+});
+
+async function doLogout() {
+    await fetch('/logout', { method: 'POST' });
+    window.location.href = '/login';
+}
+document.getElementById('logout-btn').addEventListener('click', doLogout);
+document.getElementById('selector-logout-btn').addEventListener('click', doLogout);
+
+initApp();
+</script>
+{% endblock %}

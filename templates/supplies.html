@@ -1,0 +1,290 @@
+{% extends "base.html" %}
+
+{% block title %}Supplies — Pgmnt{% endblock %}
+
+{% block head %}
+<style>
+    body.supplies-page .container { max-width: none; padding: 0; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>SUPPLIES</h1>
+    <div class="page-header-right">
+        <a href="/" class="header-btn">&larr; Armies</a>
+        <button id="supplies-logout-btn" class="header-btn">Logout</button>
+    </div>
+</div>
+
+<div class="supplies-body">
+    <section class="supplies-section">
+        <div class="list-section-heading">Active</div>
+        <div id="active-list" class="active-list"></div>
+        <div id="add-active-wrap" class="add-active-wrap"></div>
+        <button id="clear-checked-btn" class="header-btn supplies-clear-btn">Clear Checked</button>
+    </section>
+
+    <section class="supplies-section">
+        <div class="list-section-heading">Buy Later</div>
+        <div id="buylater-chips" class="buylater-chips"></div>
+        <div id="add-buylater-wrap" class="add-buylater-wrap"></div>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.body.classList.add('supplies-page');
+
+// ── Utilities (duplicated from index.html — no shared JS file yet) ─────────────
+
+async function fetchApi(url, opts = {}) {
+    const res = await fetch(url, opts);
+    if (res.redirected && res.url.includes('/login')) {
+        window.location.href = '/login';
+        return null;
+    }
+    return res;
+}
+
+function esc(str) {
+    return String(str)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function apiJson(url, opts = {}) {
+    const res = await fetchApi(url, opts);
+    if (!res) return null;
+    return res.json();
+}
+
+// ── State ────────────────────────────────────────────────────────────────────
+
+let activeItems = [];
+let buylaterItems = [];
+let activeSortable = null;
+
+// ── Active list ──────────────────────────────────────────────────────────────
+
+async function loadActive() {
+    const data = await apiJson('/api/supplies/active');
+    activeItems = data || [];
+    renderActive();
+}
+
+function renderActive() {
+    const list = document.getElementById('active-list');
+    list.innerHTML = '';
+
+    if (activeItems.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'list-empty';
+        empty.textContent = 'No supplies yet — add one below.';
+        list.appendChild(empty);
+    }
+
+    activeItems.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'supply-row' + (item.checked ? ' checked' : '');
+        row.dataset.id = item.id;
+        row.innerHTML = `
+            <span class="drag-handle">&#9776;</span>
+            <input type="checkbox" class="supply-check" ${item.checked ? 'checked' : ''}>
+            <span class="supply-text">${esc(item.text)}</span>
+            <button type="button" class="supply-delete-btn" title="Delete">&times;</button>
+        `;
+        row.querySelector('.supply-check').addEventListener('change', e => toggleItem(item.id, e.target.checked, row));
+        row.querySelector('.supply-delete-btn').addEventListener('click', () => deleteItem(item.id));
+        list.appendChild(row);
+    });
+
+    initActiveSortable();
+
+    const addWrap = document.getElementById('add-active-wrap');
+    addWrap.innerHTML = `<button type="button" class="add-column-btn">+ Add item</button>`;
+    addWrap.querySelector('.add-column-btn').addEventListener('click', () => showAddActiveForm(addWrap));
+}
+
+function showAddActiveForm(wrap) {
+    wrap.innerHTML = `
+        <form class="add-column-form">
+            <input type="text" placeholder="Add item&hellip;" autocomplete="off">
+            <div class="inline-form-actions">
+                <button type="submit" class="inline-form-confirm">Add</button>
+                <button type="button" class="inline-form-cancel">&times;</button>
+            </div>
+        </form>`;
+    const input = wrap.querySelector('input');
+    const form = wrap.querySelector('form');
+    input.focus();
+
+    form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+        await addItem(text);
+    });
+    input.addEventListener('keydown', e => {
+        if (e.key === 'Escape') renderActive();
+    });
+    wrap.querySelector('.inline-form-cancel').addEventListener('click', () => renderActive());
+}
+
+async function addItem(text) {
+    await apiJson('/api/supplies/active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+    });
+    await loadActive();
+}
+
+async function toggleItem(id, checked, row) {
+    row.classList.toggle('checked', checked);
+    const item = activeItems.find(i => i.id === id);
+    if (item) item.checked = checked;
+    await apiJson(`/api/supplies/active/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ checked }),
+    });
+}
+
+async function deleteItem(id) {
+    await apiJson(`/api/supplies/active/${id}`, { method: 'DELETE' });
+    await loadActive();
+}
+
+function initActiveSortable() {
+    if (typeof Sortable === 'undefined') return;
+    if (activeSortable) { activeSortable.destroy(); activeSortable = null; }
+
+    const isTouch = window.matchMedia('(pointer: coarse)').matches;
+    const opts = {
+        animation: 150,
+        ghostClass: 'sortable-ghost',
+        chosenClass: 'sortable-chosen',
+        delay: 200,
+        delayOnTouchOnly: true,
+        touchStartThreshold: 5,
+        onEnd: onActiveDragEnd,
+    };
+    if (!isTouch) opts.handle = '.drag-handle';
+    activeSortable = Sortable.create(document.getElementById('active-list'), opts);
+}
+
+async function onActiveDragEnd(evt) {
+    const orderedIds = Array.from(document.getElementById('active-list').children)
+        .filter(el => el.classList.contains('supply-row'))
+        .map(el => el.dataset.id);
+    await apiJson('/api/supplies/active/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ordered_ids: orderedIds }),
+    });
+    await loadActive();
+}
+
+document.getElementById('clear-checked-btn').addEventListener('click', async () => {
+    if (!confirm('Clear all checked items?')) return;
+    await apiJson('/api/supplies/active/clear-checked', { method: 'POST' });
+    await loadActive();
+});
+
+// ── Buy Later list ───────────────────────────────────────────────────────────
+
+async function loadBuyLater() {
+    const data = await apiJson('/api/supplies/buylater');
+    buylaterItems = data || [];
+    renderBuyLater();
+}
+
+function renderBuyLater() {
+    const container = document.getElementById('buylater-chips');
+    container.innerHTML = '';
+
+    if (buylaterItems.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'list-empty';
+        empty.textContent = 'Nothing on the buy-later list.';
+        container.appendChild(empty);
+    }
+
+    buylaterItems.forEach(item => {
+        const chip = document.createElement('span');
+        chip.className = 'buylater-chip';
+        chip.innerHTML = `
+            <span class="buylater-chip-text">${esc(item.text)}</span>
+            <button type="button" class="buylater-chip-remove" title="Remove">&times;</button>
+        `;
+        chip.querySelector('.buylater-chip-text').addEventListener('click', () => addFromBuyLater(item.id));
+        chip.querySelector('.buylater-chip-remove').addEventListener('click', e => {
+            e.stopPropagation();
+            removeBuyLaterItem(item.id);
+        });
+        container.appendChild(chip);
+    });
+
+    const addWrap = document.getElementById('add-buylater-wrap');
+    addWrap.innerHTML = `<button type="button" class="add-column-btn">+ Add</button>`;
+    addWrap.querySelector('.add-column-btn').addEventListener('click', () => showAddBuyLaterForm(addWrap));
+}
+
+function showAddBuyLaterForm(wrap) {
+    wrap.innerHTML = `
+        <form class="add-column-form">
+            <input type="text" placeholder="Buy later&hellip;" autocomplete="off">
+            <div class="inline-form-actions">
+                <button type="submit" class="inline-form-confirm">Add</button>
+                <button type="button" class="inline-form-cancel">&times;</button>
+            </div>
+        </form>`;
+    const input = wrap.querySelector('input');
+    const form = wrap.querySelector('form');
+    input.focus();
+
+    form.addEventListener('submit', async e => {
+        e.preventDefault();
+        const text = input.value.trim();
+        if (!text) return;
+        await addBuyLaterItem(text);
+    });
+    input.addEventListener('keydown', e => {
+        if (e.key === 'Escape') renderBuyLater();
+    });
+    wrap.querySelector('.inline-form-cancel').addEventListener('click', () => renderBuyLater());
+}
+
+async function addBuyLaterItem(text) {
+    await apiJson('/api/supplies/buylater', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+    });
+    await loadBuyLater();
+}
+
+async function addFromBuyLater(id) {
+    await apiJson(`/api/supplies/buylater/${id}/add-to-active`, { method: 'POST' });
+    await loadActive();
+}
+
+async function removeBuyLaterItem(id) {
+    await apiJson(`/api/supplies/buylater/${id}`, { method: 'DELETE' });
+    await loadBuyLater();
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+
+async function doLogout() {
+    await fetch('/logout', { method: 'POST' });
+    window.location.href = '/login';
+}
+document.getElementById('supplies-logout-btn').addEventListener('click', doLogout);
+
+loadActive();
+loadBuyLater();
+</script>
+{% endblock %}
