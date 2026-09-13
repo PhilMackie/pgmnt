@@ -40,6 +40,7 @@ def init_db():
                 project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 name        TEXT NOT NULL,
                 position    INTEGER NOT NULL,
+                is_completed INTEGER NOT NULL DEFAULT 0,
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL
             )
@@ -55,6 +56,7 @@ def init_db():
                 position    INTEGER NOT NULL,
                 starred     INTEGER NOT NULL DEFAULT 0,
                 tags        TEXT NOT NULL DEFAULT '[]',
+                completed_from_column_id TEXT,
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL
             )
@@ -80,6 +82,17 @@ def init_db():
         # Pre-existing installs: cards table predates tags.
         try:
             conn.execute("ALTER TABLE cards ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
+        except sqlite3.OperationalError:
+            pass
+
+        # Pre-existing installs: columns table predates the completed column,
+        # cards table predates completed_from_column_id.
+        try:
+            conn.execute("ALTER TABLE columns ADD COLUMN is_completed INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE cards ADD COLUMN completed_from_column_id TEXT")
         except sqlite3.OperationalError:
             pass
 
@@ -116,6 +129,7 @@ def _row_to_column(row, cards=None):
         "project_id": row["project_id"],
         "name": row["name"],
         "position": row["position"],
+        "is_completed": bool(row["is_completed"]),
         "cards": cards if cards is not None else [],
     }
 
@@ -139,6 +153,7 @@ def _row_to_card(row):
         "position": row["position"],
         "starred": bool(row["starred"]),
         "tags": tags,
+        "completed_from_column_id": row["completed_from_column_id"],
     }
 
 
@@ -286,7 +301,10 @@ def create_column(project_id, name):
             (col_id, project_id, name, count, now, now),
         )
         conn.commit()
-    return {"id": col_id, "project_id": project_id, "name": name, "position": count, "cards": []}
+    return {
+        "id": col_id, "project_id": project_id, "name": name, "position": count,
+        "is_completed": False, "cards": [],
+    }
 
 
 def rename_column(column_id, name):
@@ -295,9 +313,11 @@ def rename_column(column_id, name):
         return {"error": "Column name is required"}
 
     with get_db() as conn:
-        row = conn.execute("SELECT id FROM columns WHERE id = ?", (column_id,)).fetchone()
+        row = conn.execute("SELECT id, is_completed FROM columns WHERE id = ?", (column_id,)).fetchone()
         if not row:
             return {"error": "Column not found"}
+        if row["is_completed"]:
+            return {"error": "Cannot rename the Completed column"}
         conn.execute(
             "UPDATE columns SET name = ?, updated_at = ? WHERE id = ?",
             (name, _now(), column_id),
@@ -308,9 +328,11 @@ def rename_column(column_id, name):
 
 def delete_column(column_id):
     with get_db() as conn:
-        row = conn.execute("SELECT project_id FROM columns WHERE id = ?", (column_id,)).fetchone()
+        row = conn.execute("SELECT project_id, is_completed FROM columns WHERE id = ?", (column_id,)).fetchone()
         if not row:
             return {"error": "Column not found"}
+        if row["is_completed"]:
+            return {"error": "Cannot delete the Completed column"}
         project_id = row["project_id"]
         conn.execute("DELETE FROM cards WHERE column_id = ?", (column_id,))
         conn.execute("DELETE FROM columns WHERE id = ?", (column_id,))
@@ -324,9 +346,11 @@ def reorder_columns(project_id, ordered_ids):
         return {"error": "ordered_ids is required"}
 
     with get_db() as conn:
+        # The Completed column is always rendered last and never draggable,
+        # so it's excluded here - the client never includes it in ordered_ids.
         existing = {
             r["id"] for r in conn.execute(
-                "SELECT id FROM columns WHERE project_id = ?", (project_id,)
+                "SELECT id FROM columns WHERE project_id = ? AND is_completed = 0", (project_id,)
             ).fetchall()
         }
         if set(ordered_ids) != existing:
@@ -362,6 +386,7 @@ def create_card(column_id, title):
     return {
         "id": card_id, "column_id": column_id, "title": title, "notes": "",
         "color": None, "checklist": [], "position": count, "starred": False, "tags": [],
+        "completed_from_column_id": None,
     }
 
 
@@ -426,6 +451,92 @@ def toggle_card_star(card_id):
     return _row_to_card(updated)
 
 
+def _get_or_create_completed_column(conn, project_id):
+    row = conn.execute(
+        "SELECT id FROM columns WHERE project_id = ? AND is_completed = 1", (project_id,)
+    ).fetchone()
+    if row:
+        return row["id"]
+
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM columns WHERE project_id = ?", (project_id,)
+    ).fetchone()["n"]
+    col_id = str(uuid.uuid4())
+    now = _now()
+    conn.execute(
+        """INSERT INTO columns (id, project_id, name, position, is_completed, created_at, updated_at)
+           VALUES (?, ?, 'Completed', ?, 1, ?, ?)""",
+        (col_id, project_id, count, now, now),
+    )
+    return col_id
+
+
+def complete_card(card_id):
+    with get_db() as conn:
+        card = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+        if not card:
+            return {"error": "Card not found"}
+        source_column = conn.execute(
+            "SELECT * FROM columns WHERE id = ?", (card["column_id"],)
+        ).fetchone()
+        if not source_column:
+            return {"error": "Column not found"}
+        if source_column["is_completed"]:
+            return {"error": "Card is already completed"}
+
+        completed_column_id = _get_or_create_completed_column(conn, source_column["project_id"])
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM cards WHERE column_id = ?", (completed_column_id,)
+        ).fetchone()["n"]
+
+        conn.execute(
+            """UPDATE cards SET column_id = ?, position = ?, completed_from_column_id = ?, updated_at = ?
+               WHERE id = ?""",
+            (completed_column_id, count, card["column_id"], _now(), card_id),
+        )
+        conn.commit()
+        updated = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+    return _row_to_card(updated)
+
+
+def uncomplete_card(card_id):
+    with get_db() as conn:
+        card = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+        if not card:
+            return {"error": "Card not found"}
+        current_column = conn.execute(
+            "SELECT * FROM columns WHERE id = ?", (card["column_id"],)
+        ).fetchone()
+        if not current_column or not current_column["is_completed"]:
+            return {"error": "Card is not completed"}
+
+        target = None
+        if card["completed_from_column_id"]:
+            target = conn.execute(
+                "SELECT * FROM columns WHERE id = ?", (card["completed_from_column_id"],)
+            ).fetchone()
+        if not target:
+            target = conn.execute(
+                "SELECT * FROM columns WHERE project_id = ? AND is_completed = 0 ORDER BY position LIMIT 1",
+                (current_column["project_id"],),
+            ).fetchone()
+        if not target:
+            return {"error": "No column to restore to"}
+
+        count = conn.execute(
+            "SELECT COUNT(*) AS n FROM cards WHERE column_id = ?", (target["id"],)
+        ).fetchone()["n"]
+
+        conn.execute(
+            """UPDATE cards SET column_id = ?, position = ?, completed_from_column_id = NULL, updated_at = ?
+               WHERE id = ?""",
+            (target["id"], count, _now(), card_id),
+        )
+        conn.commit()
+        updated = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+    return _row_to_card(updated)
+
+
 def delete_card(card_id):
     with get_db() as conn:
         row = conn.execute("SELECT column_id FROM cards WHERE id = ?", (card_id,)).fetchone()
@@ -477,8 +588,10 @@ def move_card(card_id, dest_column_id, ordered_ids):
 
         source_column_id = card["column_id"]
 
+        # A manual drag is itself the user's placement decision, so any pending
+        # completed_from_column_id (set by complete_card) no longer applies.
         conn.execute(
-            "UPDATE cards SET column_id = ?, updated_at = ? WHERE id = ?",
+            "UPDATE cards SET column_id = ?, completed_from_column_id = NULL, updated_at = ? WHERE id = ?",
             (dest_column_id, _now(), card_id),
         )
 

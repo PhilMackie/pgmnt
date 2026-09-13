@@ -11,6 +11,7 @@ from daemons.board import (
     get_projects, create_project, rename_project, delete_project, reorder_projects,
     create_column, rename_column, delete_column, reorder_columns,
     create_card, update_card, delete_card, reorder_cards_in_column, move_card, toggle_card_star,
+    complete_card, uncomplete_card,
 )
 from daemons.supplies import (
     init_db as init_supplies_db,
@@ -211,6 +212,20 @@ def api_card_delete(card_id):
 @login_required
 def api_card_toggle_star(card_id):
     result = toggle_card_star(card_id)
+    return jsonify(result), (400 if "error" in result else 200)
+
+
+@app.route("/api/cards/<card_id>/complete", methods=["POST"])
+@login_required
+def api_card_complete(card_id):
+    result = complete_card(card_id)
+    return jsonify(result), (400 if "error" in result else 200)
+
+
+@app.route("/api/cards/<card_id>/complete", methods=["DELETE"])
+@login_required
+def api_card_uncomplete(card_id):
+    result = uncomplete_card(card_id)
     return jsonify(result), (400 if "error" in result else 200)
 
 

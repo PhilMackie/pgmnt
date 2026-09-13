@@ -36,6 +36,7 @@
                 <div id="tag-filter-dropdown" class="tag-filter-dropdown" style="display:none;"></div>
             </div>
             <button id="view-toggle-btn" class="header-btn">List View</button>
+            <button id="show-completed-btn" class="header-btn">Show Completed</button>
             <button type="button" class="header-btn timer-toggle-btn">Timer</button>
             <a href="/supplies" class="header-btn">Supplies</a>
             <button id="logout-btn" class="header-btn">Logout</button>
@@ -81,6 +82,7 @@
         </div>
 
         <div class="card-panel-actions">
+            <button id="card-complete-btn" class="card-action-btn">Complete</button>
             <button id="card-delete" class="card-action-btn card-danger">Delete</button>
         </div>
     </div>
@@ -181,6 +183,7 @@ let columnSortable = null;
 let cardSortables = [];
 let pendingFocusColumnId = null;
 let viewMode = localStorage.getItem('pgmnt-view-mode') === 'list' ? 'list' : 'board';
+let showCompleted = localStorage.getItem('pgmnt-show-completed') === 'true';
 
 function updateViewToggleLabel() {
     document.getElementById('view-toggle-btn').textContent = viewMode === 'list' ? 'Board View' : 'List View';
@@ -193,6 +196,29 @@ document.getElementById('view-toggle-btn').addEventListener('click', () => {
     renderBoard();
 });
 updateViewToggleLabel();
+
+function getCompletedColumn() {
+    return boardData.columns.find(c => c.is_completed) || null;
+}
+
+function isCardCompleted(card) {
+    const col = getCompletedColumn();
+    return !!col && card.column_id === col.id;
+}
+
+function updateShowCompletedLabel() {
+    const btn = document.getElementById('show-completed-btn');
+    btn.textContent = showCompleted ? 'Hide Completed' : 'Show Completed';
+    btn.classList.toggle('active', showCompleted);
+}
+
+document.getElementById('show-completed-btn').addEventListener('click', () => {
+    showCompleted = !showCompleted;
+    localStorage.setItem('pgmnt-show-completed', showCompleted ? 'true' : 'false');
+    updateShowCompletedLabel();
+    renderBoard();
+});
+updateShowCompletedLabel();
 
 function findCard(cardId) {
     for (const col of boardData.columns) {
@@ -364,8 +390,13 @@ function renderBoard() {
     if (viewMode === 'list') {
         renderListView(row);
     } else {
-        boardData.columns.forEach(col => row.appendChild(buildColumnElement(col)));
+        const normalColumns = boardData.columns.filter(c => !c.is_completed);
+        const completedColumn = getCompletedColumn();
+        normalColumns.forEach(col => row.appendChild(buildColumnElement(col)));
         row.appendChild(buildAddColumnElement());
+        if (showCompleted && completedColumn) {
+            row.appendChild(buildColumnElement(completedColumn));
+        }
         initSortables();
     }
 
@@ -477,7 +508,10 @@ document.addEventListener('click', e => {
 });
 
 function renderListView(row) {
-    if (boardData.columns.length === 0) {
+    const normalColumns = boardData.columns.filter(c => !c.is_completed);
+    const completedColumn = getCompletedColumn();
+
+    if (normalColumns.length === 0) {
         const empty = document.createElement('div');
         empty.className = 'list-empty';
         empty.textContent = 'No columns yet — switch to Board view to add one.';
@@ -485,7 +519,11 @@ function renderListView(row) {
         return;
     }
 
-    boardData.columns.forEach(col => {
+    const sections = showCompleted && completedColumn
+        ? [...normalColumns, completedColumn]
+        : normalColumns;
+
+    sections.forEach(col => {
         const section = document.createElement('div');
         section.className = 'list-section';
 
@@ -526,24 +564,27 @@ function renderListView(row) {
 
 function buildColumnElement(column) {
     const col = document.createElement('div');
-    col.className = 'board-column';
+    col.className = 'board-column' + (column.is_completed ? ' completed-column' : '');
     col.dataset.columnId = column.id;
 
     const header = document.createElement('div');
     header.className = 'column-header';
-    header.innerHTML = `
-        <span class="column-drag-handle">&#9776;</span>
-        <input class="column-name-input" type="text" value="${esc(column.name)}">
-        <button class="column-delete-btn" title="Delete column">&times;</button>
-    `;
+    if (column.is_completed) {
+        header.innerHTML = `<span class="column-name-static">Completed</span>`;
+    } else {
+        header.innerHTML = `
+            <span class="column-drag-handle">&#9776;</span>
+            <input class="column-name-input" type="text" value="${esc(column.name)}">
+            <button class="column-delete-btn" title="Delete column">&times;</button>
+        `;
+        const nameInput = header.querySelector('.column-name-input');
+        nameInput.addEventListener('blur', () => handleColumnRename(column.id, nameInput));
+        nameInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') nameInput.blur();
+        });
+        header.querySelector('.column-delete-btn').addEventListener('click', () => handleColumnDelete(column.id, column.name));
+    }
     col.appendChild(header);
-
-    const nameInput = header.querySelector('.column-name-input');
-    nameInput.addEventListener('blur', () => handleColumnRename(column.id, nameInput));
-    nameInput.addEventListener('keydown', e => {
-        if (e.key === 'Enter') nameInput.blur();
-    });
-    header.querySelector('.column-delete-btn').addEventListener('click', () => handleColumnDelete(column.id, column.name));
 
     const cardList = document.createElement('div');
     cardList.className = 'card-list';
@@ -551,11 +592,13 @@ function buildColumnElement(column) {
     column.cards.forEach(card => cardList.appendChild(buildCardElement(card)));
     col.appendChild(cardList);
 
-    const addWrap = document.createElement('div');
-    addWrap.className = 'card-add-wrap';
-    addWrap.innerHTML = `<button type="button" class="card-add-btn">+ Add card</button>`;
-    addWrap.querySelector('.card-add-btn').addEventListener('click', () => showAddCardForm(addWrap, column.id));
-    col.appendChild(addWrap);
+    if (!column.is_completed) {
+        const addWrap = document.createElement('div');
+        addWrap.className = 'card-add-wrap';
+        addWrap.innerHTML = `<button type="button" class="card-add-btn">+ Add card</button>`;
+        addWrap.querySelector('.card-add-btn').addEventListener('click', () => showAddCardForm(addWrap, column.id));
+        col.appendChild(addWrap);
+    }
 
     return col;
 }
@@ -695,7 +738,7 @@ function initSortables() {
         delay: 200,
         delayOnTouchOnly: true,
         touchStartThreshold: 5,
-        filter: '.add-column',
+        filter: '.add-column, .completed-column',
         onEnd: onColumnDragEnd,
     };
     if (!isTouch) columnOpts.handle = '.column-drag-handle';
@@ -726,7 +769,7 @@ async function onCardDragEnd(evt) {
 
 async function onColumnDragEnd(evt) {
     const orderedIds = Array.from(document.getElementById('board-row').children)
-        .filter(el => el.classList.contains('board-column'))
+        .filter(el => el.classList.contains('board-column') && !el.classList.contains('completed-column'))
         .map(el => el.dataset.columnId);
     await apiJson('/api/columns/reorder', {
         method: 'POST',
@@ -783,6 +826,7 @@ function openCardPanel(cardId) {
     renderCardTags();
     populateTagSuggestions();
     updateStarButton();
+    updateCompleteButton();
 
     document.getElementById('card-panel').style.display = 'flex';
 }
@@ -801,6 +845,21 @@ async function toggleCardStar() {
     activeCard.starred = updated.starred;
     activeCard.position = updated.position;
     updateStarButton();
+    await loadBoard();
+}
+
+function updateCompleteButton() {
+    const btn = document.getElementById('card-complete-btn');
+    if (!activeCard) return;
+    btn.textContent = isCardCompleted(activeCard) ? 'Restore' : 'Complete';
+}
+
+async function toggleCardComplete() {
+    if (!activeCard) return;
+    const method = isCardCompleted(activeCard) ? 'DELETE' : 'POST';
+    const updated = await apiJson(`/api/cards/${activeCard.id}/complete`, { method });
+    if (!updated || updated.error) return;
+    closeCardPanelImmediate();
     await loadBoard();
 }
 
@@ -1179,6 +1238,7 @@ document.getElementById('timer-dismiss-btn').addEventListener('click', cancelTim
 
 document.getElementById('card-close').addEventListener('click', () => closeCardPanel());
 document.getElementById('card-star').addEventListener('click', () => toggleCardStar());
+document.getElementById('card-complete-btn').addEventListener('click', () => toggleCardComplete());
 
 document.getElementById('card-delete').addEventListener('click', async () => {
     if (!activeCard) return;

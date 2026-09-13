@@ -294,6 +294,21 @@ input:focus { outline: none; border-color: var(--accent); }
 }
 .column-delete-btn:hover { color: #ff4136; }
 
+.completed-column {
+    opacity: 0.75;
+    border-style: dashed;
+}
+
+.column-name-static {
+    flex: 1;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 0;
+}
+
 .card-list {
     flex: 1;
     overflow-y: auto;
