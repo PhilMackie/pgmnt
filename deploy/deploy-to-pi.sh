@@ -11,7 +11,7 @@ APP_DEST="/opt/pgmnt/app"
 echo "=== Deploying Pgmnt to $PI_HOST ==="
 
 echo "Creating remote directories..."
-ssh "$PI_HOST" "sudo mkdir -p /opt/pgmnt && sudo chown pi:pi /opt/pgmnt && mkdir -p /opt/pgmnt/app /opt/pgmnt/logs"
+ssh "$PI_HOST" "if [ ! -d /opt/pgmnt ]; then sudo mkdir -p /opt/pgmnt && sudo chown pi:pi /opt/pgmnt; fi && mkdir -p /opt/pgmnt/app /opt/pgmnt/logs"
 
 echo "Syncing application files..."
 rsync -avz --progress \
