@@ -1,0 +1,23 @@
+[Unit]
+Description=Pgmnt Hobby Project Board
+After=network.target
+
+[Service]
+Type=notify
+User=pi
+Group=pi
+WorkingDirectory=/opt/pgmnt/app
+Environment="PATH=/opt/pgmnt/venv/bin"
+EnvironmentFile=/opt/pgmnt/app/.env
+ExecStart=/opt/pgmnt/venv/bin/gunicorn -c /opt/pgmnt/gunicorn.conf.py app:app
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/pgmnt
+
+[Install]
+WantedBy=multi-user.target
