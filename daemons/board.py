@@ -53,6 +53,8 @@ def init_db():
                 color       TEXT,
                 checklist   TEXT NOT NULL DEFAULT '[]',
                 position    INTEGER NOT NULL,
+                starred     INTEGER NOT NULL DEFAULT 0,
+                tags        TEXT NOT NULL DEFAULT '[]',
                 created_at  TEXT NOT NULL,
                 updated_at  TEXT NOT NULL
             )
@@ -66,6 +68,18 @@ def init_db():
         # Pre-existing installs: columns table predates project_id.
         try:
             conn.execute("ALTER TABLE columns ADD COLUMN project_id TEXT REFERENCES projects(id)")
+        except sqlite3.OperationalError:
+            pass
+
+        # Pre-existing installs: cards table predates starred.
+        try:
+            conn.execute("ALTER TABLE cards ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+
+        # Pre-existing installs: cards table predates tags.
+        try:
+            conn.execute("ALTER TABLE cards ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
         except sqlite3.OperationalError:
             pass
 
@@ -111,6 +125,10 @@ def _row_to_card(row):
         checklist = json.loads(row["checklist"]) if row["checklist"] else []
     except (json.JSONDecodeError, TypeError):
         checklist = []
+    try:
+        tags = json.loads(row["tags"]) if row["tags"] else []
+    except (json.JSONDecodeError, TypeError):
+        tags = []
     return {
         "id": row["id"],
         "column_id": row["column_id"],
@@ -119,6 +137,8 @@ def _row_to_card(row):
         "color": row["color"],
         "checklist": checklist,
         "position": row["position"],
+        "starred": bool(row["starred"]),
+        "tags": tags,
     }
 
 
@@ -235,7 +255,7 @@ def get_board(project_id):
         if col_ids:
             placeholders = ",".join("?" * len(col_ids))
             card_rows = conn.execute(
-                f"SELECT * FROM cards WHERE column_id IN ({placeholders}) ORDER BY column_id, position",
+                f"SELECT * FROM cards WHERE column_id IN ({placeholders}) ORDER BY column_id, starred DESC, position",
                 col_ids,
             ).fetchall()
 
@@ -341,11 +361,11 @@ def create_card(column_id, title):
         conn.commit()
     return {
         "id": card_id, "column_id": column_id, "title": title, "notes": "",
-        "color": None, "checklist": [], "position": count,
+        "color": None, "checklist": [], "position": count, "starred": False, "tags": [],
     }
 
 
-def update_card(card_id, title=None, notes=None, color=None, checklist=None):
+def update_card(card_id, title=None, notes=None, color=None, checklist=None, tags=None):
     with get_db() as conn:
         row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
         if not row:
@@ -355,13 +375,53 @@ def update_card(card_id, title=None, notes=None, color=None, checklist=None):
         new_notes = row["notes"] if notes is None else notes
         new_color = row["color"] if color is None else (color or None)
         new_checklist = row["checklist"] if checklist is None else json.dumps(checklist)
+        new_tags = row["tags"] if tags is None else json.dumps(tags)
 
         conn.execute(
-            "UPDATE cards SET title = ?, notes = ?, color = ?, checklist = ?, updated_at = ? WHERE id = ?",
-            (new_title, new_notes, new_color, new_checklist, _now(), card_id),
+            "UPDATE cards SET title = ?, notes = ?, color = ?, checklist = ?, tags = ?, updated_at = ? WHERE id = ?",
+            (new_title, new_notes, new_color, new_checklist, new_tags, _now(), card_id),
         )
         conn.commit()
 
+        updated = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+    return _row_to_card(updated)
+
+
+def toggle_card_star(card_id):
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+        if not row:
+            return {"error": "Card not found"}
+
+        column_id = row["column_id"]
+        now = _now()
+
+        if row["starred"]:
+            max_pos = conn.execute(
+                "SELECT COALESCE(MAX(position), -1) AS m FROM cards WHERE column_id = ? AND starred = 0",
+                (column_id,),
+            ).fetchone()["m"]
+            conn.execute(
+                "UPDATE cards SET starred = 0, position = ?, updated_at = ? WHERE id = ?",
+                (max_pos + 1, now, card_id),
+            )
+        else:
+            # Newly-starred cards join the starred group in alphabetical order
+            # by default; existing starred siblings get renumbered alongside it
+            # (drag-and-drop reorder can override this afterwards).
+            siblings = conn.execute(
+                "SELECT id, title FROM cards WHERE column_id = ? AND starred = 1 AND id != ?",
+                (column_id, card_id),
+            ).fetchall()
+            ordered = sorted(
+                [(row["title"], card_id)] + [(s["title"], s["id"]) for s in siblings],
+                key=lambda t: t[0].lower(),
+            )
+            for idx, (_, cid) in enumerate(ordered):
+                conn.execute("UPDATE cards SET position = ? WHERE id = ?", (idx, cid))
+            conn.execute("UPDATE cards SET starred = 1, updated_at = ? WHERE id = ?", (now, card_id))
+
+        conn.commit()
         updated = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
     return _row_to_card(updated)
 

@@ -14,6 +14,7 @@
     <div class="page-header">
         <h1>PGMNT</h1>
         <div class="page-header-right">
+            <button type="button" class="header-btn timer-toggle-btn">Timer</button>
             <a href="/supplies" class="header-btn">Supplies</a>
             <button id="selector-logout-btn" class="header-btn">Logout</button>
         </div>
@@ -30,7 +31,12 @@
         <h1 id="current-project-name">PGMNT</h1>
         <div class="page-header-right">
             <button id="back-to-projects-btn" class="header-btn">&larr; Armies</button>
+            <div class="tag-filter-wrap">
+                <button id="tag-filter-btn" class="header-btn">Filter</button>
+                <div id="tag-filter-dropdown" class="tag-filter-dropdown" style="display:none;"></div>
+            </div>
             <button id="view-toggle-btn" class="header-btn">List View</button>
+            <button type="button" class="header-btn timer-toggle-btn">Timer</button>
             <a href="/supplies" class="header-btn">Supplies</a>
             <button id="logout-btn" class="header-btn">Logout</button>
         </div>
@@ -41,6 +47,7 @@
     <div id="card-panel" class="card-panel" style="display:none;">
         <div class="card-panel-header">
             <input id="card-title" class="card-title-input" type="text" placeholder="Card title">
+            <button id="card-star" class="card-star-btn" title="Star">&#9733;</button>
             <button id="card-close" class="card-close">&times;</button>
         </div>
 
@@ -64,8 +71,40 @@
             </form>
         </div>
 
+        <div class="card-panel-section">
+            <div class="card-panel-label">Tags</div>
+            <div id="card-tags-chips" class="card-tags-chips"></div>
+            <form id="tag-add-form" class="checklist-add-form">
+                <input id="tag-add-input" type="text" placeholder="Add tag&hellip;" autocomplete="off" list="tag-suggestions-list">
+            </form>
+            <datalist id="tag-suggestions-list"></datalist>
+        </div>
+
         <div class="card-panel-actions">
             <button id="card-delete" class="card-action-btn card-danger">Delete</button>
+        </div>
+    </div>
+</div>
+
+<div id="timer-modal-overlay" class="timer-modal-overlay hidden">
+    <div class="timer-modal">
+        <div class="timer-modal-header">
+            <span>Timer</span>
+            <button type="button" id="timer-modal-close" class="card-close">&times;</button>
+        </div>
+        <div id="timer-idle" class="timer-row">
+            <input id="timer-minutes-input" type="number" min="1" step="1" value="25">
+            <span class="timer-unit">min</span>
+            <button type="button" id="timer-start-btn" class="card-action-btn">Start</button>
+        </div>
+        <div id="timer-running" class="timer-row hidden">
+            <div id="timer-display" class="timer-display">00:00</div>
+            <button type="button" id="timer-cancel-btn" class="card-action-btn card-danger">Cancel</button>
+        </div>
+        <div id="timer-done" class="timer-row hidden">
+            <div class="timer-done-label">Time&rsquo;s up!</div>
+            <button type="button" id="timer-restart-btn" class="card-action-btn">Restart</button>
+            <button type="button" id="timer-dismiss-btn" class="card-action-btn card-danger">Dismiss</button>
         </div>
     </div>
 </div>
@@ -136,6 +175,8 @@ let activeCard = null;          // full card object currently open in the panel
 let cardTitleOriginal = '';
 let cardNoteOriginal = '';
 let cardChecklist = [];
+let cardTags = [];
+let activeTagFilters = new Set();
 let columnSortable = null;
 let cardSortables = [];
 let pendingFocusColumnId = null;
@@ -348,7 +389,92 @@ function renderBoard() {
     } else {
         pendingFocusColumnId = null;
     }
+
+    applyTagFilter();
 }
+
+// ── Tag filtering ────────────────────────────────────────────────────────────
+
+function allProjectTags() {
+    const all = new Set();
+    boardData.columns.forEach(col => col.cards.forEach(c => (c.tags || []).forEach(t => all.add(t))));
+    return Array.from(all).sort((a, b) => a.localeCompare(b));
+}
+
+function cardMatchesFilter(card) {
+    if (activeTagFilters.size === 0) return true;
+    return (card.tags || []).some(t => activeTagFilters.has(t));
+}
+
+function applyTagFilter() {
+    document.querySelectorAll('.board-card, .list-row').forEach(el => {
+        const card = findCard(el.dataset.id);
+        el.classList.toggle('tag-filtered-out', !!card && !cardMatchesFilter(card));
+    });
+}
+
+function updateTagFilterBtnLabel() {
+    const btn = document.getElementById('tag-filter-btn');
+    btn.textContent = activeTagFilters.size > 0 ? `Filter (${activeTagFilters.size})` : 'Filter';
+    btn.classList.toggle('active', activeTagFilters.size > 0);
+}
+
+function renderTagFilterDropdown() {
+    const dd = document.getElementById('tag-filter-dropdown');
+    const tags = allProjectTags();
+    dd.innerHTML = '';
+
+    if (tags.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'tag-filter-empty';
+        empty.textContent = 'No tags yet';
+        dd.appendChild(empty);
+        return;
+    }
+
+    tags.forEach(tag => {
+        const item = document.createElement('div');
+        item.className = 'tag-filter-item' + (activeTagFilters.has(tag) ? ' active' : '');
+        item.textContent = tag;
+        item.addEventListener('click', () => {
+            if (activeTagFilters.has(tag)) activeTagFilters.delete(tag);
+            else activeTagFilters.add(tag);
+            renderTagFilterDropdown();
+            applyTagFilter();
+            updateTagFilterBtnLabel();
+        });
+        dd.appendChild(item);
+    });
+
+    const clear = document.createElement('div');
+    clear.className = 'tag-filter-clear';
+    clear.textContent = 'Clear filters';
+    clear.addEventListener('click', () => {
+        activeTagFilters.clear();
+        renderTagFilterDropdown();
+        applyTagFilter();
+        updateTagFilterBtnLabel();
+    });
+    dd.appendChild(clear);
+}
+
+document.getElementById('tag-filter-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    const dd = document.getElementById('tag-filter-dropdown');
+    if (dd.style.display === 'none') {
+        renderTagFilterDropdown();
+        dd.style.display = 'block';
+    } else {
+        dd.style.display = 'none';
+    }
+});
+
+document.addEventListener('click', e => {
+    const wrap = document.querySelector('.tag-filter-wrap');
+    if (wrap && !wrap.contains(e.target)) {
+        document.getElementById('tag-filter-dropdown').style.display = 'none';
+    }
+});
 
 function renderListView(row) {
     if (boardData.columns.length === 0) {
@@ -378,13 +504,18 @@ function renderListView(row) {
         col.cards.forEach(card => {
             const item = document.createElement('div');
             item.className = 'list-row';
+            item.dataset.id = card.id;
             if (card.color) applyCardColor(item, card.color);
 
             const total = card.checklist.length;
             const done = card.checklist.filter(i => i.done).length;
             const badge = total > 0 ? `<span class="list-row-badge">${done}/${total}</span>` : '';
+            const star = card.starred ? `<span class="list-row-star" title="Starred">&#9733;</span>` : '';
+            const tags = (card.tags && card.tags.length > 0)
+                ? card.tags.map(t => `<span class="card-tag-chip">${esc(t)}</span>`).join('')
+                : '';
 
-            item.innerHTML = `<span class="list-row-title">${esc(card.title)}</span>${badge}`;
+            item.innerHTML = `<span class="list-row-title">${star}${esc(card.title)}${tags}</span>${badge}`;
             item.addEventListener('click', () => openCardPanel(card.id));
             section.appendChild(item);
         });
@@ -512,16 +643,24 @@ function buildCardElement(card) {
     const total = card.checklist.length;
     const done = card.checklist.filter(i => i.done).length;
     const badge = total > 0 ? `<span class="card-checklist-badge">${done}/${total}</span>` : '';
+    const star = card.starred ? `<span class="card-star-marker" title="Starred">&#9733;</span>` : '';
+    const tagsRow = (card.tags && card.tags.length > 0)
+        ? `<div class="card-tags-row">${card.tags.map(t => `<span class="card-tag-chip">${esc(t)}</span>`).join('')}</div>`
+        : '';
 
     div.innerHTML = `
         <div class="card-row">
             <span class="drag-handle">&#9776;</span>
+            ${star}
             <span class="card-title-text">${esc(card.title)}</span>
         </div>
+        ${tagsRow}
         ${badge ? `<div class="card-footer">${badge}</div>` : ''}
     `;
 
     div.querySelector('.card-title-text').addEventListener('click', () => openCardPanel(card.id));
+    const starEl = div.querySelector('.card-star-marker');
+    if (starEl) starEl.addEventListener('click', () => openCardPanel(card.id));
 
     return div;
 }
@@ -637,11 +776,32 @@ function openCardPanel(cardId) {
     cardNoteOriginal = card.notes || '';
 
     cardChecklist = card.checklist ? JSON.parse(JSON.stringify(card.checklist)) : [];
+    cardTags = card.tags ? JSON.parse(JSON.stringify(card.tags)) : [];
 
     renderColorSwatches();
     renderChecklist();
+    renderCardTags();
+    populateTagSuggestions();
+    updateStarButton();
 
     document.getElementById('card-panel').style.display = 'flex';
+}
+
+function updateStarButton() {
+    const btn = document.getElementById('card-star');
+    if (!activeCard) return;
+    btn.classList.toggle('active', !!activeCard.starred);
+    btn.title = activeCard.starred ? 'Unstar' : 'Star';
+}
+
+async function toggleCardStar() {
+    if (!activeCard) return;
+    const updated = await apiJson(`/api/cards/${activeCard.id}/star`, { method: 'POST' });
+    if (!updated || updated.error) return;
+    activeCard.starred = updated.starred;
+    activeCard.position = updated.position;
+    updateStarButton();
+    await loadBoard();
 }
 
 function closeCardPanelImmediate() {
@@ -650,6 +810,7 @@ function closeCardPanelImmediate() {
     cardTitleOriginal = '';
     cardNoteOriginal = '';
     cardChecklist = [];
+    cardTags = [];
 }
 
 async function closeCardPanel() {
@@ -790,7 +951,234 @@ document.getElementById('checklist-add-form').addEventListener('submit', e => {
     persistChecklist();
 });
 
+function renderCardTags() {
+    const container = document.getElementById('card-tags-chips');
+    container.innerHTML = '';
+    cardTags.forEach((tag, idx) => {
+        const chip = document.createElement('span');
+        chip.className = 'tag-chip';
+        chip.innerHTML = `${esc(tag)}<button type="button" class="tag-chip-remove" title="Remove">&times;</button>`;
+        chip.querySelector('.tag-chip-remove').addEventListener('click', () => {
+            cardTags.splice(idx, 1);
+            renderCardTags();
+            persistTags();
+        });
+        container.appendChild(chip);
+    });
+}
+
+function populateTagSuggestions() {
+    const list = document.getElementById('tag-suggestions-list');
+    list.innerHTML = allProjectTags().map(t => `<option value="${esc(t)}"></option>`).join('');
+}
+
+async function persistTags() {
+    if (!activeCard) return;
+    activeCard.tags = JSON.parse(JSON.stringify(cardTags));
+    await apiJson(`/api/cards/${activeCard.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tags: cardTags }),
+    });
+    const cardEl = document.querySelector(`.board-card[data-id="${activeCard.id}"]`);
+    if (cardEl) {
+        let tagsRow = cardEl.querySelector('.card-tags-row');
+        if (cardTags.length > 0) {
+            const html = cardTags.map(t => `<span class="card-tag-chip">${esc(t)}</span>`).join('');
+            if (!tagsRow) {
+                tagsRow = document.createElement('div');
+                tagsRow.className = 'card-tags-row';
+                cardEl.querySelector('.card-row').insertAdjacentElement('afterend', tagsRow);
+            }
+            tagsRow.innerHTML = html;
+        } else if (tagsRow) {
+            tagsRow.remove();
+        }
+    }
+    populateTagSuggestions();
+    applyTagFilter();
+}
+
+document.getElementById('tag-add-form').addEventListener('submit', e => {
+    e.preventDefault();
+    const input = document.getElementById('tag-add-input');
+    const raw = input.value.trim();
+    if (!raw) return;
+    input.value = '';
+    if (!cardTags.some(t => t.toLowerCase() === raw.toLowerCase())) {
+        cardTags.push(raw);
+        renderCardTags();
+        persistTags();
+    }
+});
+
+// ── Countdown timer (global — not tied to a card, like Chronos's widget) ──────
+
+const TIMER_STORAGE_KEY = 'pgmnt-timer';
+let timerData = JSON.parse(localStorage.getItem(TIMER_STORAGE_KEY) || 'null'); // { endAt, minutes } | null
+// A timer already expired before this page load (e.g. reload hours later) shouldn't re-fire the alarm.
+let timerNotified = timerData ? (new Date(timerData.endAt).getTime() - Date.now() <= 0) : false;
+if (timerData) document.getElementById('timer-minutes-input').value = timerData.minutes;
+
+function saveTimerData() {
+    if (timerData) localStorage.setItem(TIMER_STORAGE_KEY, JSON.stringify(timerData));
+    else localStorage.removeItem(TIMER_STORAGE_KEY);
+}
+
+function formatRemaining(ms) {
+    if (ms <= 0) return 'Done';
+    const totalSec = Math.ceil(ms / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function requestTimerNotificationPermission() {
+    if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+    }
+}
+
+function playTimerAlarm() {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        for (let i = 0; i < 3; i++) {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.type = 'square';
+            osc.frequency.value = 880;
+            gain.gain.value = 0.3;
+            const start = ctx.currentTime + i * 0.4;
+            osc.start(start);
+            osc.stop(start + 0.15);
+        }
+    } catch (e) { /* Web Audio unsupported */ }
+}
+
+function notifyTimerDone() {
+    playTimerAlarm();
+    if ('Notification' in window && Notification.permission === 'granted') {
+        new Notification('Pgmnt — Timer done', { body: 'Your countdown timer finished.' });
+    }
+}
+
+function isTimerModalOpen() {
+    return !document.getElementById('timer-modal-overlay').classList.contains('hidden');
+}
+
+function openTimerModal() {
+    document.getElementById('timer-modal-overlay').classList.remove('hidden');
+    renderTimerModal();
+}
+
+function closeTimerModal() {
+    document.getElementById('timer-modal-overlay').classList.add('hidden');
+}
+
+function toggleTimerModal() {
+    if (isTimerModalOpen()) closeTimerModal();
+    else openTimerModal();
+}
+
+document.querySelectorAll('.timer-toggle-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+        e.stopPropagation();
+        toggleTimerModal();
+    });
+});
+document.getElementById('timer-modal-close').addEventListener('click', closeTimerModal);
+document.getElementById('timer-modal-overlay').addEventListener('click', e => {
+    if (e.target.id === 'timer-modal-overlay') closeTimerModal();
+});
+
+function updateTimerButtons(remaining) {
+    document.querySelectorAll('.timer-toggle-btn').forEach(btn => {
+        if (timerData == null) {
+            btn.textContent = 'Timer';
+            btn.classList.remove('active');
+        } else {
+            btn.textContent = remaining > 0 ? `Timer ${formatRemaining(remaining)}` : 'Timer Done';
+            btn.classList.toggle('active', remaining <= 0);
+        }
+    });
+}
+
+function tickTimer() {
+    if (!timerData) {
+        updateTimerButtons(0);
+        return;
+    }
+    const remaining = new Date(timerData.endAt).getTime() - Date.now();
+    updateTimerButtons(remaining);
+    if (isTimerModalOpen()) renderTimerModal();
+    if (remaining <= 0 && !timerNotified) {
+        timerNotified = true;
+        notifyTimerDone();
+    }
+}
+
+setInterval(tickTimer, 1000);
+tickTimer();
+
+function renderTimerModal() {
+    const idleEl = document.getElementById('timer-idle');
+    const runningEl = document.getElementById('timer-running');
+    const doneEl = document.getElementById('timer-done');
+
+    if (!timerData) {
+        idleEl.classList.remove('hidden');
+        runningEl.classList.add('hidden');
+        doneEl.classList.add('hidden');
+        return;
+    }
+
+    const remaining = new Date(timerData.endAt).getTime() - Date.now();
+    if (remaining > 0) {
+        idleEl.classList.add('hidden');
+        runningEl.classList.remove('hidden');
+        doneEl.classList.add('hidden');
+        document.getElementById('timer-display').textContent = formatRemaining(remaining);
+    } else {
+        idleEl.classList.add('hidden');
+        runningEl.classList.add('hidden');
+        doneEl.classList.remove('hidden');
+    }
+}
+
+function startTimer(minutes) {
+    requestTimerNotificationPermission();
+    timerNotified = false;
+    timerData = {
+        endAt: new Date(Date.now() + minutes * 60 * 1000).toISOString(),
+        minutes,
+    };
+    saveTimerData();
+    renderTimerModal();
+    tickTimer();
+}
+
+function cancelTimer() {
+    timerData = null;
+    timerNotified = false;
+    saveTimerData();
+    renderTimerModal();
+    tickTimer();
+}
+
+document.getElementById('timer-start-btn').addEventListener('click', () => {
+    const minutes = parseInt(document.getElementById('timer-minutes-input').value) || 25;
+    startTimer(minutes);
+});
+document.getElementById('timer-restart-btn').addEventListener('click', () => {
+    startTimer((timerData && timerData.minutes) || 25);
+});
+document.getElementById('timer-cancel-btn').addEventListener('click', cancelTimer);
+document.getElementById('timer-dismiss-btn').addEventListener('click', cancelTimer);
+
 document.getElementById('card-close').addEventListener('click', () => closeCardPanel());
+document.getElementById('card-star').addEventListener('click', () => toggleCardStar());
 
 document.getElementById('card-delete').addEventListener('click', async () => {
     if (!activeCard) return;
@@ -802,7 +1190,9 @@ document.getElementById('card-delete').addEventListener('click', async () => {
 });
 
 document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && activeCard) closeCardPanel();
+    if (e.key !== 'Escape') return;
+    if (isTimerModalOpen()) closeTimerModal();
+    else if (activeCard) closeCardPanel();
 });
 
 document.addEventListener('click', e => {
